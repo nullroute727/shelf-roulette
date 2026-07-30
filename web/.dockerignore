@@ -1,0 +1,24 @@
+# Build context is the web/ directory.
+.dockerignore
+Dockerfile
+
+# Icon/asset generation helpers are build-time tools, not runtime assets.
+site/**/*.py
+site/**/__pycache__/
+**/*.pyc
+
+# Editor and OS noise.
+*.md
+*.swp
+*.tmp
+*~
+.DS_Store
+.git
+.gitignore
+.idea/
+.vscode/
+
+# Never ship sourcemaps or local env files.
+**/*.map
+.env
+.env.*

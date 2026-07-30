@@ -1,0 +1,603 @@
+/*
+ * Shelf Roulette
+ * Library / card-catalog styling. Ink navy field, aged paper slip, brass accents.
+ * Mobile first. Breakpoints at 500px and 900px.
+ */
+
+:root {
+  --ink: #0e1b2b;
+  --ink-deep: #0a1421;
+  --ink-panel: #16283c;
+  --ink-line: #223b55;
+
+  --paper: #ece0c4;
+  --paper-warm: #e0cfa6;
+  --paper-shadow: #c2ae85;
+  --paper-ink: #2b2317;
+  --paper-ink-soft: #5c4e33;
+
+  --brass: #c9962b;
+  --brass-bright: #e6bb51;
+  --brass-deep: #94670f;
+
+  --font-display: "Zilla Slab", Georgia, "Times New Roman", serif;
+  --font-spine: "Barlow Condensed", "Arial Narrow", Helvetica, sans-serif;
+
+  --tap: 44px;
+  --pad: 16px;
+  --radius: 3px;
+}
+
+* { box-sizing: border-box; }
+
+/* Several containers below set an explicit display, which would otherwise beat
+   the user agent's [hidden] rule and leave hidden views on screen. */
+[hidden] { display: none !important; }
+
+html {
+  -webkit-text-size-adjust: 100%;
+  /* Set here as well as on body so suppressing pull-to-refresh does not depend
+     on the body-to-viewport propagation rule. */
+  overscroll-behavior: none;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  min-height: 100dvh;
+  background-color: var(--ink);
+  /* Faint card-catalog ruling plus a soft vignette so the field is not flat. */
+  background-image:
+    radial-gradient(115% 80% at 50% 0%, #1a3450 0%, transparent 60%),
+    repeating-linear-gradient(180deg, transparent 0 27px, rgba(201, 150, 43, 0.045) 27px 28px);
+  color: var(--paper);
+  font-family: var(--font-spine);
+  font-size: 17px;
+  line-height: 1.45;
+  overscroll-behavior: none;
+}
+
+.app {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  min-height: 100vh;
+  min-height: 100dvh;
+  max-width: 620px;
+  margin: 0 auto;
+  padding:
+    calc(env(safe-area-inset-top) + 14px)
+    calc(env(safe-area-inset-right) + var(--pad))
+    calc(env(safe-area-inset-bottom) + 18px)
+    calc(env(safe-area-inset-left) + var(--pad));
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px; height: 1px;
+  padding: 0; margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* ---------- Masthead ---------- */
+
+.masthead { text-align: center; }
+
+.masthead-rule {
+  height: 3px;
+  background: linear-gradient(90deg, transparent, var(--brass) 18%, var(--brass-bright) 50%, var(--brass) 82%, transparent);
+  opacity: 0.85;
+  margin-bottom: 12px;
+}
+
+.masthead-tag {
+  margin: 0;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.24em;
+  text-transform: uppercase;
+  color: var(--brass-bright);
+}
+
+.masthead-title {
+  margin: 2px 0 0;
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: clamp(30px, 10vw, 46px);
+  line-height: 1.02;
+  letter-spacing: -0.012em;
+  color: var(--paper);
+  text-shadow: 0 2px 0 rgba(0, 0, 0, 0.35);
+}
+
+.masthead-sub {
+  margin: 6px 0 0;
+  font-size: 14px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #9fb3c8;
+}
+
+/* ---------- Stage ---------- */
+
+.stage {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  align-items: center;
+  /* Centred so the wheel sits in the middle of the field instead of leaving a
+     void above the footer before the first spin. */
+  justify-content: center;
+}
+
+/* ---------- Panels (loading / error / empty) ---------- */
+
+.panel {
+  width: 100%;
+  background: var(--ink-panel);
+  border: 1px solid var(--ink-line);
+  border-left: 3px solid var(--brass);
+  border-radius: var(--radius);
+  padding: 22px 18px;
+  text-align: center;
+}
+
+.panel-title {
+  margin: 0 0 8px;
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: 22px;
+  color: var(--paper);
+}
+
+.panel-text { margin: 0 0 6px; color: #c4d2e0; }
+
+.panel-detail {
+  margin: 8px 0 0;
+  font-size: 14px;
+  color: #8fa3b8;
+  word-break: break-word;
+}
+
+.panel-error .btn, .panel-empty .btn { margin-top: 16px; }
+
+.spinner {
+  width: 34px; height: 34px;
+  margin: 0 auto 14px;
+  border: 3px solid rgba(201, 150, 43, 0.25);
+  border-top-color: var(--brass-bright);
+  border-radius: 50%;
+  animation: spin 900ms linear infinite;
+}
+
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* ---------- Wheel ---------- */
+
+.wheel-view {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+}
+
+.wheel-wrap {
+  position: relative;
+  width: 100%;
+  display: flex;
+  justify-content: center;
+}
+
+.wheel {
+  display: block;
+  width: 100%;
+  height: auto;
+  max-width: 520px;
+  touch-action: none;
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-tap-highlight-color: transparent;
+  cursor: pointer;
+  border-radius: 50%;
+  box-shadow:
+    0 0 0 1px rgba(201, 150, 43, 0.35),
+    0 18px 38px rgba(0, 0, 0, 0.45);
+}
+
+.wheel:focus-visible { outline: 3px solid var(--brass-bright); outline-offset: 4px; }
+
+/* Fixed brass pointer at top, pointing down into the wheel. */
+.pointer {
+  position: absolute;
+  top: -2px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 0; height: 0;
+  border-left: 13px solid transparent;
+  border-right: 13px solid transparent;
+  border-top: 24px solid var(--brass-bright);
+  filter: drop-shadow(0 2px 2px rgba(0, 0, 0, 0.6));
+  z-index: 2;
+}
+
+.hint {
+  margin: 0;
+  font-size: 13px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: #8fa3b8;
+  text-align: center;
+}
+
+/* ---------- Controls ---------- */
+
+.controls {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.btn {
+  min-height: var(--tap);
+  padding: 11px 20px;
+  border-radius: var(--radius);
+  border: 1px solid transparent;
+  font-family: var(--font-spine);
+  font-size: 17px;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  cursor: pointer;
+  transition: background-color 120ms ease, color 120ms ease, transform 60ms ease;
+}
+
+.btn:active { transform: translateY(1px); }
+
+.btn:focus-visible { outline: 3px solid var(--brass-bright); outline-offset: 3px; }
+
+.btn-primary {
+  /* The one loud control on the page, so it gets extra height and weight. */
+  min-height: 52px;
+  font-size: 18px;
+  background: var(--brass);
+  border-color: var(--brass-deep);
+  color: #241a03;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.32),
+    0 6px 16px rgba(0, 0, 0, 0.3);
+}
+
+.btn-ghost {
+  background: transparent;
+  border-color: var(--ink-line);
+  color: #c4d2e0;
+}
+
+.btn[disabled] { opacity: 0.5; cursor: default; }
+
+/* Mode toggle reads as engaged when the whole shelf is loaded. */
+/* Utility bar: secondary actions live here as quiet text controls so the wheel
+   and the single primary button carry the page instead of a stack of boxes. */
+.utility {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  width: 100%;
+}
+
+.utility-sep {
+  width: 1px;
+  height: 20px;
+  background: var(--ink-line);
+  flex: 0 0 auto;
+}
+
+.btn-quiet {
+  min-height: var(--tap);
+  padding: 6px 16px;
+  background: none;
+  border: 0;
+  border-radius: var(--radius);
+  font-family: var(--font-spine);
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: #9fb3c8;
+  cursor: pointer;
+  transition: color 120ms ease;
+}
+
+.btn-quiet:focus-visible { outline: 3px solid var(--brass-bright); outline-offset: 2px; }
+.btn-quiet[disabled] { opacity: 0.45; cursor: default; }
+
+/* Toggle carries a small brass lamp that fills when the whole shelf is loaded. */
+.btn-toggle { display: inline-flex; align-items: center; gap: 9px; }
+
+.btn-toggle::before {
+  content: "";
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  border: 1px solid #64788d;
+  flex: 0 0 auto;
+}
+
+.btn-toggle[aria-pressed="true"] { color: var(--brass-bright); }
+
+.btn-toggle[aria-pressed="true"]::before {
+  background: var(--brass-bright);
+  border-color: var(--brass);
+  box-shadow: 0 0 6px rgba(230, 187, 81, 0.6);
+}
+
+.btn-link {
+  min-height: var(--tap);
+  padding: 6px 4px;
+  background: none;
+  border: 0;
+  font-family: var(--font-spine);
+  font-size: 14px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--brass);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  cursor: pointer;
+}
+
+.btn-link:focus-visible { outline: 2px solid var(--brass-bright); outline-offset: 2px; }
+
+/* ---------- Roster (keyboard and screen reader friendly list) ---------- */
+
+.roster {
+  width: 100%;
+  border: 1px solid var(--ink-line);
+  border-radius: var(--radius);
+  background: rgba(22, 40, 60, 0.6);
+}
+
+.roster-summary {
+  min-height: var(--tap);
+  display: flex;
+  align-items: center;
+  padding: 10px 14px;
+  font-size: 13px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: #9fb3c8;
+  cursor: pointer;
+}
+
+.roster-summary:focus-visible { outline: 3px solid var(--brass-bright); outline-offset: -3px; }
+
+.roster-list {
+  margin: 0;
+  padding: 0 18px 14px 34px;
+  font-size: 15px;
+  color: #c4d2e0;
+}
+
+.roster-note {
+  margin: 0;
+  padding: 0 18px 14px;
+  font-size: 15px;
+  color: #c4d2e0;
+}
+
+.roster-list li { padding: 3px 0; }
+.roster-list .roster-author { color: #8fa3b8; }
+
+/* ---------- Result slip ---------- */
+
+.slip-holder { width: 100%; }
+
+.slip {
+  position: relative;
+  /* Ruled index-card lines layered over the aged paper wash. Both live in one
+     background-image so a later declaration cannot drop the paper colour. */
+  background-color: var(--paper);
+  background-image:
+    repeating-linear-gradient(180deg, transparent 0 25px, rgba(106, 90, 63, 0.16) 25px 26px),
+    linear-gradient(176deg, var(--paper) 0%, var(--paper-warm) 100%);
+  color: var(--paper-ink);
+  border-radius: 2px;
+  padding: 18px 16px 16px;
+  box-shadow:
+    0 1px 0 rgba(255, 255, 255, 0.5) inset,
+    0 14px 30px rgba(0, 0, 0, 0.5);
+  animation: slip-in 260ms ease-out both;
+}
+
+@keyframes slip-in {
+  from { opacity: 0; transform: translateY(10px) rotate(-0.4deg); }
+  to { opacity: 1; transform: none; }
+}
+
+.slip::after {
+  /* Aged edge shading. */
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 2px;
+  box-shadow: inset 0 0 26px rgba(140, 116, 74, 0.35);
+  pointer-events: none;
+}
+
+.slip-stamp {
+  position: absolute;
+  top: 10px;
+  right: 8px;
+  transform: rotate(-9deg);
+  font-family: var(--font-spine);
+  font-weight: 600;
+  font-size: 15px;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: var(--brass-deep);
+  border: 2px solid var(--brass-deep);
+  border-radius: 2px;
+  padding: 3px 9px;
+  opacity: 0.72;
+  mix-blend-mode: multiply;
+  z-index: 1;
+}
+
+.slip-body {
+  display: flex;
+  gap: 14px;
+  align-items: flex-start;
+}
+
+.slip-cover-frame {
+  position: relative;
+  flex: 0 0 auto;
+  width: 92px;
+  aspect-ratio: 2 / 3;
+  background: var(--paper-shadow);
+  border: 1px solid rgba(43, 35, 23, 0.35);
+  box-shadow: 2px 3px 8px rgba(43, 35, 23, 0.35);
+  overflow: hidden;
+}
+
+.slip-cover {
+  position: relative;
+  z-index: 1;
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.slip-cover[hidden] { display: none; }
+
+.slip-cover-fallback {
+  position: absolute;
+  inset: 0;
+  background: repeating-linear-gradient(135deg, #8d7a55 0 6px, #7d6b48 6px 12px);
+}
+
+.slip-text { min-width: 0; }
+
+.slip-label {
+  margin: 0 0 2px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  color: var(--paper-ink-soft);
+}
+
+.slip-title {
+  margin: 0;
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: clamp(20px, 6.2vw, 27px);
+  line-height: 1.12;
+  color: #1e1810;
+  overflow-wrap: break-word;
+}
+
+.slip-author {
+  margin: 4px 0 0;
+  font-size: 16px;
+  font-style: italic;
+  color: #4a3d28;
+}
+
+.slip-meta {
+  margin: 8px 0 0;
+  font-size: 13px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--paper-ink-soft);
+}
+
+.slip-link {
+  /* Full size tap target, since this sits just above a 44px button. */
+  display: inline-flex;
+  align-items: center;
+  margin-top: 6px;
+  min-height: var(--tap);
+  font-size: 14px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #6b4c07;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.slip-link:focus-visible { outline: 2px solid var(--brass-deep); outline-offset: 2px; }
+
+.slip-actions {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 16px;
+  padding-top: 14px;
+  border-top: 1px solid rgba(106, 90, 63, 0.3);
+}
+
+.slip-actions .btn-ghost {
+  border-color: rgba(43, 35, 23, 0.4);
+  color: #3a2f1d;
+}
+
+/* ---------- Footer ---------- */
+
+.footpad {
+  text-align: center;
+  border-top: 1px solid var(--ink-line);
+  padding-top: 10px;
+}
+
+.foot-line {
+  margin: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  align-items: center;
+  justify-content: center;
+  font-size: 13px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #7f93a8;
+}
+
+.foot-dim { color: #6b7f94; }
+.foot-sep { opacity: 0.5; }
+
+/* ---------- Larger screens ---------- */
+
+@media (min-width: 500px) {
+  .app { gap: 22px; padding-top: calc(env(safe-area-inset-top) + 26px); }
+  .controls { justify-content: center; }
+  .controls #btn-spin { min-width: 280px; }
+  .slip { padding: 24px 22px 20px; }
+  .slip-cover-frame { width: 124px; }
+  .slip-stamp { font-size: 18px; top: 14px; right: 14px; }
+  .slip-actions { flex-direction: row; }
+  .slip-actions .btn { flex: 1 1 auto; }
+}
+
+@media (min-width: 900px) {
+  .app { max-width: 660px; }
+}
+
+/* ---------- Reduced motion ---------- */
+
+@media (prefers-reduced-motion: reduce) {
+  .slip { animation: none; }
+  .spinner { animation-duration: 2400ms; }
+  .btn { transition: none; }
+  .btn:active { transform: none; }
+}

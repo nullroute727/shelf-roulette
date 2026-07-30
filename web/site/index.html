@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0e1b2b">
+<meta name="description" content="Spin a wheel of book spines to pick the next book off your Goodreads to-read shelf.">
+<meta name="color-scheme" content="dark">
+<title>Shelf Roulette</title>
+
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="icon" href="/icons/favicon-32.png" sizes="32x32" type="image/png">
+<link rel="apple-touch-icon" href="/icons/icon-192.png">
+<link rel="preload" href="/fonts/zilla-slab-700-latin.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="/fonts/barlow-condensed-600-latin.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="stylesheet" href="/fonts/fonts.css">
+<link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+
+<div class="app">
+  <header class="masthead">
+    <div class="masthead-rule" aria-hidden="true"></div>
+    <p class="masthead-tag">Card Catalog No. 167519280</p>
+    <h1 class="masthead-title">Shelf Roulette</h1>
+    <p class="masthead-sub" id="shelf-status" aria-live="polite">Loading the shelf...</p>
+  </header>
+
+  <main class="stage">
+    <!-- Loading -->
+    <section class="panel panel-loading" id="view-loading">
+      <div class="spinner" aria-hidden="true"></div>
+      <p class="panel-text">Reading your to-read shelf from Goodreads.</p>
+    </section>
+
+    <!-- Error -->
+    <section class="panel panel-error" id="view-error" hidden>
+      <h2 class="panel-title">Shelf unavailable</h2>
+      <p class="panel-text" id="error-message">Something went wrong.</p>
+      <p class="panel-detail" id="error-detail" hidden></p>
+      <button type="button" class="btn btn-primary" id="btn-retry">Try again</button>
+    </section>
+
+    <!-- Nothing left to spin -->
+    <section class="panel panel-empty" id="view-empty" hidden>
+      <h2 class="panel-title">Shelf cleared</h2>
+      <p class="panel-text" id="empty-message">Every book on the shelf is hidden.</p>
+      <button type="button" class="btn btn-primary" id="btn-empty-restore">Show hidden books again</button>
+    </section>
+
+    <!-- The wheel -->
+    <section class="wheel-view" id="view-wheel" hidden>
+      <div class="wheel-wrap">
+        <div class="pointer" aria-hidden="true"></div>
+        <canvas
+          id="wheel"
+          class="wheel"
+          role="img"
+          aria-label="Wheel of candidate books"
+          tabindex="-1"></canvas>
+      </div>
+
+      <p class="hint" id="wheel-hint">Tap the wheel to spin, or flick it.</p>
+
+      <div class="controls">
+        <button type="button" class="btn btn-primary" id="btn-spin">Spin the wheel</button>
+      </div>
+
+      <div class="utility">
+        <button type="button" class="btn-quiet" id="btn-reshuffle">Reshuffle</button>
+        <span class="utility-sep" aria-hidden="true"></span>
+        <button type="button" class="btn-quiet btn-toggle" id="btn-mode" aria-pressed="true">Whole shelf</button>
+      </div>
+
+      <details class="roster" id="roster">
+        <summary class="roster-summary" id="roster-summary">On the wheel right now</summary>
+        <ol class="roster-list" id="roster-list"></ol>
+      </details>
+    </section>
+
+    <!-- Result slip -->
+    <section class="slip-holder" id="view-slip" hidden>
+      <article class="slip" id="slip">
+        <div class="slip-stamp" aria-hidden="true">Selected</div>
+        <div class="slip-body">
+          <div class="slip-cover-frame">
+            <img class="slip-cover" id="slip-cover" alt="" width="120" height="180">
+            <div class="slip-cover-fallback" id="slip-cover-fallback" aria-hidden="true"></div>
+          </div>
+          <div class="slip-text">
+            <p class="slip-label">Your next read</p>
+            <h2 class="slip-title" id="slip-title"></h2>
+            <p class="slip-author" id="slip-author"></p>
+            <p class="slip-meta" id="slip-meta"></p>
+            <a class="slip-link" id="slip-link" href="#" rel="noreferrer noopener" target="_blank">View on Goodreads</a>
+          </div>
+        </div>
+        <div class="slip-actions">
+          <button type="button" class="btn btn-primary" id="btn-reading">Reading this</button>
+          <button type="button" class="btn btn-ghost" id="btn-again">Spin again</button>
+        </div>
+      </article>
+    </section>
+  </main>
+
+  <footer class="footpad">
+    <p class="foot-line">
+      <span id="hidden-count">No books hidden.</span>
+      <button type="button" class="btn-link" id="btn-restore" hidden>Clear hidden list</button>
+    </p>
+    <p class="foot-line foot-dim">
+      <button type="button" class="btn-link" id="btn-refresh">Refresh from Goodreads</button>
+      <span id="storage-note" hidden><span class="foot-sep" aria-hidden="true">/</span> Hidden books last for this session only.</span>
+    </p>
+  </footer>
+</div>
+
+<p class="sr-only" role="status" aria-live="polite" id="announce"></p>
+
+<script src="/app.js"></script>
+
+</body>
+</html>

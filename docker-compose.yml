@@ -1,0 +1,53 @@
+name: shelf-roulette
+
+services:
+  proxy:
+    build: ./proxy
+    image: shelf-roulette-proxy:local
+    container_name: roulette-proxy
+    restart: unless-stopped
+    environment:
+      GOODREADS_USER_ID: "${GOODREADS_USER_ID:-167519280}"
+      GOODREADS_SHELF: "${GOODREADS_SHELF:-to-read}"
+      GOODREADS_RSS_KEY: "${GOODREADS_RSS_KEY:-}"
+      SHELF_TTL_SECONDS: "${SHELF_TTL_SECONDS:-3600}"
+      COVER_CACHE_DIR: /data/covers
+      LOG_LEVEL: "${LOG_LEVEL:-info}"
+      PORT: "8000"
+    volumes:
+      - cover-cache:/data/covers
+    networks:
+      - roulette
+    # No ports mapping. The proxy is only reachable from the web container.
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0) if urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=4).status == 200 else sys.exit(1)"]
+      interval: 30s
+      timeout: 6s
+      retries: 3
+      start_period: 15s
+
+  web:
+    build: ./web
+    image: shelf-roulette-web:local
+    container_name: roulette-web
+    restart: unless-stopped
+    depends_on:
+      proxy:
+        condition: service_started
+    ports:
+      - "${HOST_PORT:-8088}:8080"
+    networks:
+      - roulette
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:8080/healthz"]
+      interval: 30s
+      timeout: 6s
+      retries: 3
+      start_period: 10s
+
+networks:
+  roulette:
+    driver: bridge
+
+volumes:
+  cover-cache:
