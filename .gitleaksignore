@@ -1,0 +1,11 @@
+# Reviewed false positive, so `gitleaks git` and `gitleaks dir` both come back
+# clean on this repo.
+#
+# web/site/app.js, STORE_KEY: the generic-api-key rule fires on the entropy of
+# that constant's value. It is a localStorage key name, read and written by the
+# dismissed-books helpers in the same file. This project holds no credentials at
+# all. The only secret-shaped setting is GOODREADS_RSS_KEY, supplied per
+# deployment through a gitignored .env, and needed only when the Goodreads shelf
+# is private.
+00474cc5f2373bf25d783629ddd7426b7be9d74f:web/site/app.js:generic-api-key:17
+web/site/app.js:generic-api-key:17
