@@ -23,6 +23,8 @@ from .config import (
     CONNECT_TIMEOUT,
     MAX_COVER_BYTES,
     READ_TIMEOUT,
+    REFRESH_MARGIN_SECONDS,
+    SHELF_FETCH_BUDGET_SECONDS,
     settings,
 )
 from .covers import CoverUrlError, cache_key, cover_cache, normalize_url
@@ -72,6 +74,49 @@ class ShelfStore:
 store = ShelfStore()
 
 
+async def _fetch_shelf_bounded(client: httpx.AsyncClient) -> list[dict[str, Any]]:
+    """Walk the feed under a total deadline, so one slow page cannot stall the request."""
+    if not settings.goodreads_user_id:
+        # Caught by the FeedError handler below, so the browser shows this sentence
+        # rather than whatever Goodreads returns for a user-id-shaped hole in the URL.
+        raise FeedError(
+            "GOODREADS_USER_ID is not set. Copy .env.example to .env and put your "
+            "numeric Goodreads user id in it, then restart the proxy."
+        )
+    try:
+        return await asyncio.wait_for(fetch_shelf(client), timeout=SHELF_FETCH_BUDGET_SECONDS)
+    except asyncio.TimeoutError as exc:
+        raise FeedError(
+            f"the shelf walk exceeded its {SHELF_FETCH_BUDGET_SECONDS:.0f}s budget"
+        ) from exc
+
+
+async def _warm_shelf_loop(client: httpx.AsyncClient) -> None:
+    """Refresh the shelf on a timer so no browser request ever pays for a cold fetch.
+
+    Every client timeout this app has recorded landed on a request that arrived
+    with an empty cache and then had to sit through the whole paginated Goodreads
+    walk. Refreshing just before the TTL expires means the cached copy is replaced
+    rather than allowed to go cold, so /api/shelf answers out of memory in
+    milliseconds even on a phone that opens the app once a day.
+    """
+    # The lock is shared with the request path, so a browser arriving mid-refresh
+    # waits for this fetch and then reuses its result instead of starting a second.
+    while True:
+        try:
+            async with store.lock:
+                books = await _fetch_shelf_bounded(client)
+                store.store(books)
+                log.info("background refresh: %d books", len(books))
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            # A failed warm-up is not fatal: the request path still has its own
+            # fetch, and the last good copy is still served in the meantime.
+            log.warning("background shelf refresh failed: %s", exc)
+        await asyncio.sleep(max(settings.shelf_ttl_seconds - REFRESH_MARGIN_SECONDS, 60))
+
+
 @contextlib.asynccontextmanager
 async def lifespan(app: FastAPI):
     cover_cache.prepare()
@@ -93,9 +138,13 @@ async def lifespan(app: FastAPI):
         settings.shelf_ttl_seconds,
         "set" if settings.goodreads_rss_key else "unset",
     )
+    warmer = asyncio.create_task(_warm_shelf_loop(client))
     try:
         yield
     finally:
+        warmer.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await warmer
         await client.aclose()
 
 
@@ -116,7 +165,15 @@ def _error(status: int, error: str, detail: str) -> JSONResponse:
 
 @app.get("/api/health")
 async def health() -> JSONResponse:
-    return JSONResponse({"status": "ok"})
+    # The shelf identity is echoed back so the page can render its masthead without
+    # anybody's account id being baked into the HTML at build time.
+    return JSONResponse(
+        {
+            "status": "ok",
+            "userId": settings.goodreads_user_id,
+            "shelf": settings.goodreads_shelf,
+        }
+    )
 
 
 @app.get("/api/shelf")
@@ -140,7 +197,7 @@ async def shelf(refresh: str | None = Query(default=None)) -> Response:
             )
 
         try:
-            books = await fetch_shelf(app.state.client)
+            books = await _fetch_shelf_bounded(app.state.client)
         except PrivateShelfError as exc:
             log.warning("shelf feed returned zero items: %s", exc)
             stale = _stale_response()

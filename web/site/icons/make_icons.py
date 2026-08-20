@@ -12,7 +12,7 @@ with an ink-navy centre hub ringed in brass and a brass pointer at the top
 aiming down into the wheel.
 
 Rerun with:
-    python3 /home/queco/bookshelf/web/site/icons/make_icons.py
+    python3 web/site/icons/make_icons.py
 
 Outputs into the same directory as this script:
     icon-192.png, icon-512.png, icon-maskable-512.png, favicon-32.png

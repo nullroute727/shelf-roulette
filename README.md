@@ -2,7 +2,13 @@
 
 **What it is:** a self-hosted wheel of book spines that reads your Goodreads to-read shelf live and spins to pick what you read next. Two small containers, everything stays on your LAN, no CSV export and no writes back to Goodreads.
 
-**The one env var to set:** `GOODREADS_USER_ID` in `.env` (defaults to `167519280`, so it runs as shipped).
+![The wheel in readable-set mode, eighteen book spines with jacket art and titles](docs/wheel.jpg)
+
+![The result slip: cover, title, author, year, page count, average rating, and a link to Goodreads](docs/slip.jpg)
+
+**Requirements:** Docker with the Compose plugin. Nothing else — no Node, no Python, no build step.
+
+**The one env var to set:** `GOODREADS_USER_ID` in `.env`. There is no default; the app tells you so in the browser until you set it.
 
 **The one command to run:**
 
@@ -10,7 +16,74 @@
 cp .env.example .env && docker compose up -d --build
 ```
 
-Then open **http://localhost:8088** (or `http://obsidian:8088` from another machine on the LAN).
+Then open **http://localhost:8088** (or `http://<host>:8088` from another machine on the LAN).
+
+---
+
+## Reaching it over Tailscale
+
+The LAN URL only works on the LAN. To spin the wheel from a phone on cellular, publish it to
+your tailnet with Tailscale Serve:
+
+```bash
+sudo tailscale serve --bg --https=8443 http://127.0.0.1:8088
+```
+
+That gives **https://&lt;machine&gt;.&lt;tailnet&gt;.ts.net:8443** — tailnet only, never Funnel, so it is
+not exposed to the public internet. Serve terminates TLS with a real Let's Encrypt certificate,
+which matters for more than the padlock: iOS only offers **Add to Home Screen** on a secure
+origin, so the PWA install described below works over this URL and not over the plain-HTTP LAN
+one.
+
+Pick a port nothing else on the host has claimed, and check both sides before you do:
+
+```bash
+tailscale serve status      # what the tailnet already publishes
+ss -ltn                     # what is bound locally
+```
+
+The serve config is stored in `tailscaled`'s state, so it survives a reboot. To undo it, pass
+the same port back with `off`:
+
+```bash
+sudo tailscale serve --https=8443 off
+```
+
+Two things to check on the phone if the URL does not load, because neither produces a useful
+error message:
+
+- Tailscale has to be **connected** on that device — a disconnected client cannot resolve the
+  name at all.
+- **Use Tailscale DNS** has to be on. MagicDNS names resolve only through `100.100.100.100`;
+  public resolvers return nothing for them.
+
+And include the port. Dropping it sends the browser to 443, which Serve is not listening on
+unless you put it there.
+
+### Why the app is built to survive that path
+
+A tunnelled phone is not a reliable client, and the failure is silent rather than loud: the
+tunnel re-handshakes whenever the phone changes network, iOS suspends a backgrounded tab and
+kills its in-flight requests, and a sleeping radio can take a full second just to answer. A
+request lost that way never fails — it simply never returns.
+
+So the frontend never waits forever. Every shelf request gets a 12 second deadline, a failed
+attempt is retried three times on a short backoff with the attempt count shown in the loading
+panel, and the app refetches on its own when the device comes back online or the tab returns to
+the foreground. A dropped connection now heals without the user knowing; only a genuine,
+repeated failure reaches the error panel.
+
+The one thing that is never retried is an error the backend deliberately sent, such as
+"shelf is empty or private". That is a considered answer, not a dropped packet, so it is shown
+as-is rather than hammered.
+
+On the backend, `roulette-proxy` refreshes the shelf on a timer just before the cache expires,
+so the cached copy is replaced instead of going cold. A cold fetch is a paginated walk over
+several Goodreads pages, and every client timeout this app ever recorded landed on a request
+that arrived to an empty cache and had to sit through it. Now `/api/shelf` answers from memory
+in single-digit milliseconds even on the first open of the day. The walk itself is capped at 45
+seconds, deliberately under nginx's 60 second `proxy_read_timeout`, so a slow upstream produces
+this app's own JSON error rather than an nginx HTML gateway page.
 
 ---
 
@@ -19,7 +92,7 @@ Then open **http://localhost:8088** (or `http://obsidian:8088` from another mach
 Goodreads retired its API and has not issued new keys since December 2020. The per-shelf RSS feed still works:
 
 ```
-https://www.goodreads.com/review/list_rss/167519280?shelf=to-read
+https://www.goodreads.com/review/list_rss/<user-id>?shelf=to-read
 ```
 
 That feed is XML and is CORS-blocked, so a browser cannot fetch it directly. `roulette-proxy` fetches it server-side, walks the pagination, and re-serves clean JSON. It also streams cover images through so the browser never talks to Goodreads at all.
@@ -47,7 +120,7 @@ The browser only ever talks to one origin, so there is no CORS problem and no mi
 Open your Goodreads profile. The URL looks like:
 
 ```
-https://www.goodreads.com/user/show/167519280-madison
+https://www.goodreads.com/user/show/12345678-yourname
 ```
 
 The digits before the dash are your user id. Put that in `.env` as `GOODREADS_USER_ID`.
@@ -63,7 +136,7 @@ All config lives in `.env`. See `.env.example` for the annotated version.
 
 | Variable | Default | What it does |
 | --- | --- | --- |
-| `GOODREADS_USER_ID` | `167519280` | Numeric Goodreads user id to read |
+| `GOODREADS_USER_ID` | none, **required** | Numeric Goodreads user id to read |
 | `GOODREADS_SHELF` | `to-read` | Shelf name to spin |
 | `SHELF_TTL_SECONDS` | `3600` | How long the parsed shelf is cached in memory |
 | `GOODREADS_RSS_KEY` | empty | Private feed key, only needed for a private profile |
@@ -125,7 +198,7 @@ If Goodreads is slow or down, `/api/shelf` returns the last good cached copy wit
 
 ### The two wheel modes
 
-**Whole shelf** is the default: every book on the shelf gets its own spine, all 242 of them. At that density each wedge is about 1.5 degrees wide, so spine titles and jacket art are physically impossible and are dropped rather than rendered as mush. The wheel becomes a packed shelf of coloured spines, and the winning pick is marked with a brass tab at the rim plus the full result slip underneath. Every book has an equal chance, which is the point.
+**Whole shelf** is the default: every book on the shelf gets its own spine, however many that is. On a shelf of a couple of hundred books each wedge is a degree or two wide, so spine titles and jacket art are physically impossible and are dropped rather than rendered as mush. The wheel becomes a packed shelf of coloured spines, and the winning pick is marked with a brass tab at the rim plus the full result slip underneath. Every book has an equal chance, which is the point.
 
 **Readable set** falls back to a slice sized for the viewport: 18 spines on desktop, 10 below 500px, because eighteen titles on a phone is unreadable. This is the only mode where titles fit on the spines, and on viewports 500px and wider it also paints each book's cover into its wedge. The full shelf stays the pool either way, and the winning slip always shows the cover in both modes.
 
@@ -139,7 +212,7 @@ A web app manifest plus icons ship with the web container, so Brave and Chrome o
 
 ## Fonts
 
-Zilla Slab and Barlow Condensed are vendored as woff2 files in `web/site/fonts/` and served with `@font-face` from the same origin. Nothing is fetched from `fonts.googleapis.com`, so typography does not depend on outbound internet access. Both are licensed under the SIL Open Font License.
+Zilla Slab and Barlow Condensed are vendored as woff2 files in `web/site/fonts/` and served with `@font-face` from the same origin. Nothing is fetched from `fonts.googleapis.com`, so typography does not depend on outbound internet access. Both are redistributed under the SIL Open Font License 1.1; the licence and its copyright notices are in [`web/site/fonts/OFL.txt`](web/site/fonts/OFL.txt).
 
 ## Operating it
 
@@ -160,7 +233,9 @@ Both services declare `restart: unless-stopped` and a healthcheck, so they come 
 .
 ├── docker-compose.yml
 ├── .env.example
+├── LICENSE
 ├── README.md
+├── docs/                  README screenshots
 ├── proxy/                 roulette-proxy, FastAPI + httpx
 │   ├── Dockerfile
 │   ├── requirements.txt
@@ -176,3 +251,17 @@ Both services declare `restart: unless-stopped` and a healthcheck, so they come 
         ├── fonts/
         └── icons/
 ```
+
+## Licence
+
+[MIT](LICENSE) for the source. The vendored fonts keep their own licence — see
+[`web/site/fonts/OFL.txt`](web/site/fonts/OFL.txt).
+
+## A note on Goodreads
+
+This is an unofficial personal project with no affiliation with, endorsement by, or connection
+to Goodreads or Amazon. It reads one public RSS feed that Goodreads publishes for a shelf, at
+the pace of one request per page with a delay between pages, and caches the result for an hour
+by default. It never writes anything back, and it holds no credentials beyond the optional
+private-feed key you supply for your own account. Book metadata and cover art belong to
+Goodreads and the respective rights holders.

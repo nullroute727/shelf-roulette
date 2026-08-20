@@ -1,0 +1,55 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  smoke:
+    name: build and smoke test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Byte-compile the proxy
+        run: python3 -m compileall -q proxy/app
+
+      # No .env and no GOODREADS_USER_ID on purpose: this is the state a fresh
+      # clone is in, and both containers are expected to come up healthy anyway.
+      - name: Build and start
+        run: docker compose up -d --build --wait --wait-timeout 180
+
+      - name: Health endpoint answers without touching the network
+        run: |
+          body=$(curl -fsS --retry 5 --retry-delay 2 http://127.0.0.1:8088/api/health)
+          echo "$body"
+          echo "$body" | grep -q '"status":"ok"'
+
+      - name: Static page is served
+        run: curl -fsS http://127.0.0.1:8088/ | grep -q '<title>Shelf Roulette</title>'
+
+      - name: nginx config is valid
+        run: docker compose exec -T web nginx -t
+
+      - name: An unconfigured shelf explains itself instead of failing opaquely
+        run: |
+          body=$(curl -sS http://127.0.0.1:8088/api/shelf || true)
+          echo "$body"
+          echo "$body" | grep -q 'GOODREADS_USER_ID is not set'
+
+      - name: Cover proxy refuses a host that is not Goodreads
+        run: |
+          code=$(curl -s -o /dev/null -w '%{http_code}' \
+            'http://127.0.0.1:8088/api/cover?url=https://example.com/x.jpg')
+          echo "got $code"
+          test "$code" = "400"
+
+      - name: Logs on failure
+        if: failure()
+        run: docker compose logs
+
+      - name: Tear down
+        if: always()
+        run: docker compose down -v

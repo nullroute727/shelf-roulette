@@ -7,7 +7,7 @@ services:
     container_name: roulette-proxy
     restart: unless-stopped
     environment:
-      GOODREADS_USER_ID: "${GOODREADS_USER_ID:-167519280}"
+      GOODREADS_USER_ID: "${GOODREADS_USER_ID:-}"
       GOODREADS_SHELF: "${GOODREADS_SHELF:-to-read}"
       GOODREADS_RSS_KEY: "${GOODREADS_RSS_KEY:-}"
       SHELF_TTL_SECONDS: "${SHELF_TTL_SECONDS:-3600}"

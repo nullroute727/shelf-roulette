@@ -824,17 +824,73 @@
     catch (err) { /* nothing more we can do locally */ }
   }
 
+  // A phone reaches this over the LAN or over Tailscale, and neither path is
+  // reliable the way localhost is: the tunnel re-handshakes on every network
+  // change, iOS suspends a backgrounded tab and silently kills its in-flight
+  // fetches, and a sleeping radio can take a second just to answer. A dropped
+  // fetch never settles, so without an explicit deadline the loading panel sits
+  // there forever claiming it is still reading Goodreads. Every attempt gets a
+  // deadline, and a failed attempt is retried before anything alarming is shown.
+  var FETCH_TIMEOUT_MS = 12000;
+  var RETRY_BACKOFF_MS = [1200, 2500, 5000];   // length is also the retry count
+
+  var inflight = null;      // AbortController for the attempt in flight
+  var retryTimer = null;
+  var loading = false;
+
+  function cancelFetch() {
+    if (retryTimer) {
+      window.clearTimeout(retryTimer);
+      retryTimer = null;
+    }
+    if (inflight) {
+      // An abort here rejects the pending fetch, and that rejection is ignored
+      // because the attempt it belongs to is no longer the current one.
+      try { inflight.abort(); } catch (err) { /* already settled */ }
+      inflight = null;
+    }
+  }
+
+  // AbortSignal.timeout is too new for some of the WebKit this runs on, so the
+  // controller and its timer are wired up by hand.
+  function fetchWithDeadline(url) {
+    var controller = window.AbortController ? new window.AbortController() : null;
+    var options = { headers: { Accept: "application/json" }, cache: "no-store" };
+    if (controller) options.signal = controller.signal;
+    inflight = controller;
+
+    var timer = window.setTimeout(function () {
+      if (controller) controller.abort();
+    }, FETCH_TIMEOUT_MS);
+
+    function done(value) { window.clearTimeout(timer); return value; }
+    return fetch(url, options).then(done, function (err) { done(); throw err; });
+  }
+
   function fetchShelf(refresh) {
+    cancelFetch();
+    attemptShelf(refresh, 0);
+  }
+
+  function attemptShelf(refresh, attempt) {
+    loading = true;
     show(el.viewError, false);
     show(el.viewEmpty, false);
     show(el.viewWheel, false);
     show(el.viewSlip, false);
     show(el.viewLoading, true);
+
+    // The first line names Goodreads because that is where the books come from.
+    // A retry line must not, because by then the honest answer is that we cannot
+    // tell whether this device, the proxy, or Goodreads is the one struggling.
+    el.loadingText.textContent = attempt === 0
+      ? (refresh ? "Refreshing your shelf from Goodreads." : "Reading your to-read shelf from Goodreads.")
+      : "Still trying. Attempt " + (attempt + 1) + " of " + (RETRY_BACKOFF_MS.length + 1) + ".";
     el.shelfStatus.textContent = refresh ? "Refreshing from Goodreads..." : "Loading the shelf...";
 
     var url = refresh ? API_SHELF + "?refresh=1" : API_SHELF;
 
-    return fetch(url, { headers: { Accept: "application/json" } })
+    return fetchWithDeadline(url)
       .then(function (response) {
         return response.json().then(
           function (body) { return { ok: response.ok, status: response.status, body: body }; },
@@ -842,27 +898,41 @@
         );
       })
       .then(function (result) {
+        inflight = null;
         if (!result.ok) {
+          // A JSON error body is the backend's own considered answer, so it is
+          // final and gets shown as-is. A gateway status with no JSON body came
+          // from nginx instead, which means the backend was unreachable or still
+          // starting, and that is worth another try.
+          var backendSpoke = result.body && typeof result.body === "object" && result.body.error;
+          if (!backendSpoke && result.status >= 502 && result.status <= 504) {
+            if (retryScheduled(refresh, attempt)) return;
+            showError(
+              "The shelf proxy is not responding.",
+              "The roulette-proxy container may be stopped or still starting up. Status "
+                + result.status + "."
+            );
+            return;
+          }
+
           var message = "Could not load the shelf.";
           var detail = "";
-          if (result.body && typeof result.body === "object" && result.body.error) {
+          if (backendSpoke) {
             message = String(result.body.error);
             if (result.body.detail) detail = String(result.body.detail);
-          } else if (result.status >= 502 && result.status <= 504) {
-            // Non JSON 5xx means the reverse proxy answered, not the backend.
-            message = "The shelf proxy is not responding.";
-            detail = "The roulette-proxy container may be stopped or still starting up. "
-              + "Status " + result.status + ".";
           } else {
             detail = "The server answered with status " + result.status + ".";
           }
+          loading = false;
           showError(message, detail);
           return;
         }
         if (!Array.isArray(result.body)) {
+          loading = false;
           showError("The proxy returned an unexpected response.", "Expected a JSON array of books.");
           return;
         }
+        loading = false;
         state.pool = result.body.filter(function (book) {
           return book && book.title;
         });
@@ -871,8 +941,28 @@
         renderWheelView();
       })
       .catch(function (err) {
-        showError("Could not reach the shelf proxy.", err && err.message ? err.message : "");
+        inflight = null;
+        // Nothing came back at all: the deadline fired, the tunnel dropped, or
+        // the browser killed the request. All three are transient by nature.
+        if (retryScheduled(refresh, attempt)) return;
+        loading = false;
+        showError(
+          "Could not reach the shelf proxy.",
+          navigator.onLine === false
+            ? "This device is offline. It will retry on its own once the connection is back."
+            : "The request timed out or the connection dropped. If you are on Tailscale, check the tunnel is up."
+        );
       });
+  }
+
+  // Returns true when another attempt is on the clock, so the caller stops.
+  function retryScheduled(refresh, attempt) {
+    if (attempt >= RETRY_BACKOFF_MS.length) return false;
+    retryTimer = window.setTimeout(function () {
+      retryTimer = null;
+      attemptShelf(refresh, attempt + 1);
+    }, RETRY_BACKOFF_MS[attempt]);
+    return true;
   }
 
   /* ---------------- events ---------------- */
@@ -950,6 +1040,20 @@
 
     bindGestures();
 
+    // Recovery for the two ways a phone loses this app without any error the
+    // page can see. Coming back online is the obvious one. The other is iOS
+    // suspending a backgrounded tab: its fetch is killed, and on return the tab
+    // is still showing whatever was on screen when it went away. Either way, if
+    // there are no books to spin, quietly go and get them.
+    window.addEventListener("online", function () {
+      if (state.pool.length === 0 && !loading) fetchShelf(false);
+    });
+
+    document.addEventListener("visibilitychange", function () {
+      if (document.visibilityState !== "visible") return;
+      if (state.pool.length === 0 && !loading) fetchShelf(false);
+    });
+
     var resizeTimer = null;
     window.addEventListener("resize", function () {
       if (resizeTimer) window.clearTimeout(resizeTimer);
@@ -986,6 +1090,21 @@
     else if (motionQuery.addListener) motionQuery.addListener(onMotionChange);
   }
 
+  /* ---------------- masthead ---------------- */
+
+  // The card catalog number is whichever Goodreads shelf this instance is pointed at.
+  // It is read from the backend rather than written into the HTML, so the repo carries
+  // no account id and a fork shows its own number the moment it is configured.
+  function stampCatalog() {
+    if (!el.catalogTag) return;
+    fetch("/api/health", { headers: { Accept: "application/json" }, cache: "no-store" })
+      .then(function (res) { return res.ok ? res.json() : null; })
+      .then(function (body) {
+        if (body && body.userId) el.catalogTag.textContent = "Card Catalog No. " + body.userId;
+      })
+      .catch(function () { /* decorative only, the plain label stands */ });
+  }
+
   /* ---------------- boot ---------------- */
 
   function init() {
@@ -995,7 +1114,9 @@
     el = {
       announce: $("announce"),
       shelfStatus: $("shelf-status"),
+      catalogTag: $("catalog-tag"),
       viewLoading: $("view-loading"),
+      loadingText: $("loading-text"),
       viewError: $("view-error"),
       viewEmpty: $("view-empty"),
       viewWheel: $("view-wheel"),
@@ -1031,6 +1152,7 @@
 
     loadDismissed();
     bindEvents();
+    stampCatalog();
 
     // Fonts affect spine label measurement, so redraw once they are ready.
     if (document.fonts && document.fonts.ready) {
