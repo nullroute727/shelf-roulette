@@ -2,8 +2,11 @@ name: shelf-roulette
 
 services:
   proxy:
+    # Published image first, so `docker compose pull && docker compose up -d`
+    # runs this without compiling anything. `up -d --build` still builds from
+    # source, which is what you want when hacking on it.
+    image: ghcr.io/nullroute727/shelf-roulette-proxy:${SHELF_ROULETTE_TAG:-latest}
     build: ./proxy
-    image: shelf-roulette-proxy:local
     container_name: roulette-proxy
     restart: unless-stopped
     environment:
@@ -27,8 +30,8 @@ services:
       start_period: 15s
 
   web:
+    image: ghcr.io/nullroute727/shelf-roulette-web:${SHELF_ROULETTE_TAG:-latest}
     build: ./web
-    image: shelf-roulette-web:local
     container_name: roulette-web
     restart: unless-stopped
     depends_on:

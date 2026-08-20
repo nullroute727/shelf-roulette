@@ -13,8 +13,13 @@
 **The one command to run:**
 
 ```bash
-cp .env.example .env && docker compose up -d --build
+cp .env.example .env          # then put your GOODREADS_USER_ID in it
+docker compose pull && docker compose up -d
 ```
+
+That pulls the published images and starts in seconds. To build from source
+instead — which is what you want if you are changing the code — use
+`docker compose up -d --build` and skip the pull.
 
 Then open **http://localhost:8088** (or `http://<host>:8088` from another machine on the LAN).
 
@@ -251,6 +256,19 @@ Both services declare `restart: unless-stopped` and a healthcheck, so they come 
         ├── fonts/
         └── icons/
 ```
+
+## Images
+
+Released images are published to GHCR for `linux/amd64` and `linux/arm64`, so a
+Raspberry Pi or an ARM VM runs them without compiling anything:
+
+```
+ghcr.io/nullroute727/shelf-roulette-proxy:latest
+ghcr.io/nullroute727/shelf-roulette-web:latest
+```
+
+`SHELF_ROULETTE_TAG` in `.env` picks the tag. It defaults to `latest`; set it to
+a version such as `1.0.0` to pin. Tagging `vX.Y.Z` builds and publishes both.
 
 ## Licence
 

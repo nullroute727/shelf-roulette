@@ -7,5 +7,5 @@
 # all. The only secret-shaped setting is GOODREADS_RSS_KEY, supplied per
 # deployment through a gitignored .env, and needed only when the Goodreads shelf
 # is private.
-00474cc5f2373bf25d783629ddd7426b7be9d74f:web/site/app.js:generic-api-key:17
+833c2a1de12ae7876ed3b7c970548eb403728329:web/site/app.js:generic-api-key:17
 web/site/app.js:generic-api-key:17
