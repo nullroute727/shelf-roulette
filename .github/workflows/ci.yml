@@ -6,6 +6,11 @@ on:
   pull_request:
   workflow_dispatch:
 
+# Public repo: give the automatic token the least it can do. This workflow only
+# ever reads the checkout, so nothing needs write access.
+permissions:
+  contents: read
+
 jobs:
   smoke:
     name: build and smoke test
