@@ -78,7 +78,8 @@
     winnerIndex: -1,
     cap: CAP_LARGE,
     covers: true,
-    mode: "all"
+    mode: "all",
+    stale: null        // { age: seconds, at: ms } when the proxy served a saved copy
   };
 
   var el = {};
@@ -146,6 +147,15 @@
 
   function announce(message) {
     el.announce.textContent = message;
+  }
+
+  function formatAge(seconds) {
+    var minutes = Math.round(seconds / 60);
+    if (minutes < 2) return "a minute";
+    if (minutes < 90) return minutes + " minutes";
+    var hours = Math.round(minutes / 60);
+    if (hours < 36) return hours + " hours";
+    return Math.round(hours / 24) + " days";
   }
 
   function show(node, visible) {
@@ -699,6 +709,15 @@
         available + (available === 1 ? " book on the wheel" : " books on the wheel");
     }
 
+    if (state.stale) {
+      var ageSeconds = state.stale.age + (Date.now() - state.stale.at) / 1000;
+      el.staleNote.textContent =
+        "Saved copy from " + formatAge(ageSeconds) + " ago. Goodreads could not be reached; refresh to try again.";
+      show(el.staleNote, true);
+    } else {
+      show(el.staleNote, false);
+    }
+
     var hidden = total - available;
     if (hidden > 0) {
       el.hiddenCount.textContent = hidden + (hidden === 1 ? " book hidden." : " books hidden.");
@@ -800,6 +819,7 @@
       show(el.errorDetail, false);
     }
     el.shelfStatus.textContent = "Shelf unavailable";
+    show(el.staleNote, false);
   }
 
   /* ---------------- data ---------------- */
@@ -832,11 +852,18 @@
   // there forever claiming it is still reading Goodreads. Every attempt gets a
   // deadline, and a failed attempt is retried before anything alarming is shown.
   var FETCH_TIMEOUT_MS = 12000;
+  // A forced refresh makes the proxy walk Goodreads live, ten requests or so,
+  // which takes longer than a dropped tunnel takes to prove itself dropped.
+  var REFRESH_TIMEOUT_MS = 30000;
   var RETRY_BACKOFF_MS = [1200, 2500, 5000];   // length is also the retry count
 
   var inflight = null;      // AbortController for the attempt in flight
   var retryTimer = null;
   var loading = false;
+  // Bumped by every attempt. An attempt's callbacks compare against it and bail
+  // when a newer attempt has started, so an aborted fetch (or one that settles
+  // late) can neither paint the panels nor schedule retries of its own.
+  var attemptSeq = 0;
 
   function cancelFetch() {
     if (retryTimer) {
@@ -844,8 +871,6 @@
       retryTimer = null;
     }
     if (inflight) {
-      // An abort here rejects the pending fetch, and that rejection is ignored
-      // because the attempt it belongs to is no longer the current one.
       try { inflight.abort(); } catch (err) { /* already settled */ }
       inflight = null;
     }
@@ -853,7 +878,7 @@
 
   // AbortSignal.timeout is too new for some of the WebKit this runs on, so the
   // controller and its timer are wired up by hand.
-  function fetchWithDeadline(url) {
+  function fetchWithDeadline(url, timeoutMs) {
     var controller = window.AbortController ? new window.AbortController() : null;
     var options = { headers: { Accept: "application/json" }, cache: "no-store" };
     if (controller) options.signal = controller.signal;
@@ -861,7 +886,7 @@
 
     var timer = window.setTimeout(function () {
       if (controller) controller.abort();
-    }, FETCH_TIMEOUT_MS);
+    }, timeoutMs);
 
     function done(value) { window.clearTimeout(timer); return value; }
     return fetch(url, options).then(done, function (err) { done(); throw err; });
@@ -873,6 +898,7 @@
   }
 
   function attemptShelf(refresh, attempt) {
+    var seq = ++attemptSeq;
     loading = true;
     show(el.viewError, false);
     show(el.viewEmpty, false);
@@ -890,14 +916,21 @@
 
     var url = refresh ? API_SHELF + "?refresh=1" : API_SHELF;
 
-    return fetchWithDeadline(url)
+    return fetchWithDeadline(url, refresh ? REFRESH_TIMEOUT_MS : FETCH_TIMEOUT_MS)
       .then(function (response) {
+        var meta = {
+          ok: response.ok,
+          status: response.status,
+          stale: response.headers.get("X-Shelf-Stale") === "1",
+          age: parseInt(response.headers.get("X-Shelf-Age") || "0", 10) || 0
+        };
         return response.json().then(
-          function (body) { return { ok: response.ok, status: response.status, body: body }; },
-          function () { return { ok: false, status: response.status, body: null }; }
+          function (body) { meta.body = body; return meta; },
+          function () { meta.ok = false; meta.body = null; return meta; }
         );
       })
       .then(function (result) {
+        if (seq !== attemptSeq) return;
         inflight = null;
         if (!result.ok) {
           // A JSON error body is the backend's own considered answer, so it is
@@ -907,6 +940,7 @@
           var backendSpoke = result.body && typeof result.body === "object" && result.body.error;
           if (!backendSpoke && result.status >= 502 && result.status <= 504) {
             if (retryScheduled(refresh, attempt)) return;
+            loading = false;
             showError(
               "The shelf proxy is not responding.",
               "The roulette-proxy container may be stopped or still starting up. Status "
@@ -936,11 +970,16 @@
         state.pool = result.body.filter(function (book) {
           return book && book.title;
         });
+        // The proxy serves its last good copy when Goodreads is unreachable and
+        // says so in a header; the masthead repeats it so a frozen shelf is
+        // never mistaken for a live one.
+        state.stale = result.stale ? { age: result.age, at: Date.now() } : null;
         state.winner = null;
         pickCandidates();
         renderWheelView();
       })
       .catch(function (err) {
+        if (seq !== attemptSeq) return;
         inflight = null;
         // Nothing came back at all: the deadline fired, the tunnel dropped, or
         // the browser killed the request. All three are transient by nature.
@@ -1114,6 +1153,7 @@
     el = {
       announce: $("announce"),
       shelfStatus: $("shelf-status"),
+      staleNote: $("stale-note"),
       catalogTag: $("catalog-tag"),
       viewLoading: $("view-loading"),
       loadingText: $("loading-text"),

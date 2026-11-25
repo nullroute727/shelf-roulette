@@ -21,6 +21,15 @@ jobs:
       - name: Byte-compile the proxy
         run: python3 -m compileall -q proxy/app
 
+      # Offline tests: the widget parser on captured fixtures, and the shelf
+      # walk against a fake client. No network, but feed.py imports httpx.
+      - name: Install proxy dependencies
+        run: pip install -q -r proxy/requirements.txt
+
+      - name: Proxy unit tests
+        run: python3 -m unittest discover -s tests -t .
+        working-directory: proxy
+
       # No .env and no GOODREADS_USER_ID on purpose: this is the state a fresh
       # clone is in, and both containers are expected to come up healthy anyway.
       - name: Build and start

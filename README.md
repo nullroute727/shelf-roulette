@@ -4,7 +4,11 @@
 
 ![The wheel in readable-set mode, eighteen book spines with jacket art and titles](docs/wheel.jpg)
 
-![The result slip: cover, title, author, year, page count, average rating, and a link to Goodreads](docs/slip.jpg)
+![The result slip: cover, title, author, and a link to Goodreads](docs/slip.jpg)
+
+(The slip screenshot predates October 2026 and also shows year, page count and average
+rating. Goodreads stopped publishing those along with its RSS feeds, so the slip now shows
+cover, title, author and the link.)
 
 **Requirements:** Docker with the Compose plugin. Nothing else — no Node, no Python, no build step.
 
@@ -72,10 +76,10 @@ tunnel re-handshakes whenever the phone changes network, iOS suspends a backgrou
 kills its in-flight requests, and a sleeping radio can take a full second just to answer. A
 request lost that way never fails — it simply never returns.
 
-So the frontend never waits forever. Every shelf request gets a 12 second deadline, a failed
-attempt is retried three times on a short backoff with the attempt count shown in the loading
-panel, and the app refetches on its own when the device comes back online or the tab returns to
-the foreground. A dropped connection now heals without the user knowing; only a genuine,
+So the frontend never waits forever. Every shelf request gets a 12 second deadline (30 for a
+forced refresh, which makes the proxy walk Goodreads live), a failed attempt is retried three
+times on a short backoff with the attempt count shown in the loading panel, and the app
+refetches on its own when the device comes back online or the tab returns to the foreground. A dropped connection now heals without the user knowing; only a genuine,
 repeated failure reaches the error panel.
 
 The one thing that is never retried is an error the backend deliberately sent, such as
@@ -83,24 +87,40 @@ The one thing that is never retried is an error the backend deliberately sent, s
 as-is rather than hammered.
 
 On the backend, `roulette-proxy` refreshes the shelf on a timer just before the cache expires,
-so the cached copy is replaced instead of going cold. A cold fetch is a paginated walk over
-several Goodreads pages, and every client timeout this app ever recorded landed on a request
+so the cached copy is replaced instead of going cold. A cold fetch is a walk over several
+Goodreads widget requests, and every client timeout this app ever recorded landed on a request
 that arrived to an empty cache and had to sit through it. Now `/api/shelf` answers from memory
 in single-digit milliseconds even on the first open of the day. The walk itself is capped at 45
 seconds, deliberately under nginx's 60 second `proxy_read_timeout`, so a slow upstream produces
 this app's own JSON error rather than an nginx HTML gateway page.
 
+When Goodreads cannot be reached at all, the proxy serves the last shelf it parsed and the
+masthead says so, with its age. That copy is also written to the cover-cache volume, so a
+restart in the middle of an outage still comes back with a shelf to spin rather than an error.
+A failed fetch is not retried upstream for a minute, so a phone's retries do not multiply it.
+
 ---
 
 ## Why there is a proxy
 
-Goodreads retired its API and has not issued new keys since December 2020. The per-shelf RSS feed still works:
+Goodreads retired its API in December 2020 and its per-shelf RSS feeds in October 2026, and
+the shelf pages themselves now redirect to sign-in. What still answers without a session is
+the pair of embeddable shelf widgets Goodreads offers under "Share your books":
 
 ```
-https://www.goodreads.com/review/list_rss/<user-id>?shelf=to-read
+https://www.goodreads.com/review/grid_widget/<user-id>.shelf?shelf=to-read&num_books=200&sort=date_added&order=d&widget_id=...
+https://www.goodreads.com/review/custom_widget/<user-id>.shelf?shelf=to-read&num_books=100&show_author=1&...
 ```
 
-That feed is XML and is CORS-blocked, so a browser cannot fetch it directly. `roulette-proxy` fetches it server-side, walks the pagination, and re-serves clean JSON. It also streams cover images through so the browser never talks to Goodreads at all.
+Each is a JavaScript snippet carrying the shelf as HTML, CORS-blocked, and capped (200 books
+for the grid, 100 for the custom one, with `page` ignored). `roulette-proxy` fetches them
+server-side, walks the shelf in several sort orders until the union stops growing, fills in
+authors from the custom widget, checks the count against the public profile page, and
+re-serves clean JSON. It also streams cover images through so the browser never talks to
+Goodreads at all.
+
+The widgets carry the title, author, cover and review link, and nothing else: page count,
+publication year and average rating are gone with the feed, so those fields are `null`.
 
 ## Architecture
 
@@ -110,7 +130,7 @@ browser  ->  roulette-web (nginx :8080, published on host :8088)
                  |  /api/*  reverse proxied over the internal network
                  v
              roulette-proxy (FastAPI :8000)
-                 |  paginated RSS fetch, in-memory TTL cache
+                 |  shelf widget walk, in-memory TTL cache, saved copy on disk
                  |  cover streaming with on-disk cache
                  v
              goodreads.com
@@ -118,7 +138,7 @@ browser  ->  roulette-web (nginx :8080, published on host :8088)
 
 The browser only ever talks to one origin, so there is no CORS problem and no mixed-origin image loading. Only `roulette-proxy` reaches the internet, and only to `goodreads.com` and `gr-assets.com`.
 
-**Backend stack choice:** Python with FastAPI plus httpx. One line of justification: httpx gives async paginated fetching and image streaming from a single client, while `xml.etree` in the standard library parses the feed with no extra parser dependency.
+**Backend stack choice:** Python with FastAPI plus httpx. One line of justification: httpx gives async sequential fetching and image streaming from a single client, while `html.parser` in the standard library parses the widgets with no extra parser dependency.
 
 ## Where the Goodreads user id comes from
 
@@ -130,10 +150,10 @@ https://www.goodreads.com/user/show/12345678-yourname
 
 The digits before the dash are your user id. Put that in `.env` as `GOODREADS_USER_ID`.
 
-The shelf must be publicly visible for the feed to return anything. If it is private, the feed comes back with zero items and `/api/shelf` answers with a 502 explaining exactly that. Two ways to fix it:
-
-1. Make the profile or shelf public in your Goodreads privacy settings, or
-2. Open the shelf page on Goodreads, find the RSS link at the bottom of the page, copy the `key=` value out of it, and set `GOODREADS_RSS_KEY` in `.env`. The proxy appends it to every feed request.
+The profile and shelf must be publicly visible for the widgets to return anything. If they are
+not, or the id is wrong, `/api/shelf` answers with a 502 explaining exactly that. The only fix
+is to make the profile public in your Goodreads privacy settings: the private-feed key that
+used to unlock an RSS feed went away with the feeds.
 
 ## Configuration
 
@@ -144,7 +164,6 @@ All config lives in `.env`. See `.env.example` for the annotated version.
 | `GOODREADS_USER_ID` | none, **required** | Numeric Goodreads user id to read |
 | `GOODREADS_SHELF` | `to-read` | Shelf name to spin |
 | `SHELF_TTL_SECONDS` | `3600` | How long the parsed shelf is cached in memory |
-| `GOODREADS_RSS_KEY` | empty | Private feed key, only needed for a private profile |
 | `HOST_PORT` | `8088` | Host port the UI is published on |
 | `LOG_LEVEL` | `info` | Proxy log verbosity |
 
@@ -175,13 +194,17 @@ A healthy response is a JSON array of objects shaped like this:
 {
   "title": "We Used to Live Here",
   "author": "Marcus Kliewer",
-  "pages": 312,
-  "rating": 3.56,
-  "year": 2024,
-  "coverUrl": "https://i.gr-assets.com/images/S/compressed.photo.goodreads.com/books/1697756012l/199798006._SY475_.jpg",
+  "pages": null,
+  "rating": null,
+  "year": null,
+  "coverUrl": "https://i.gr-assets.com/images/S/compressed.photo.goodreads.com/books/1697756012l/199798006._SX98_.jpg",
   "goodreadsUrl": "https://www.goodreads.com/review/show/8813642662"
 }
 ```
+
+`pages`, `rating` and `year` are always `null` now; the keys stay so older clients keep
+working. `author` can be an empty string on a very large shelf, because the author-bearing
+widget is capped lower than the one that lists the books.
 
 ## API
 
@@ -191,7 +214,7 @@ A healthy response is a JSON array of objects shaped like this:
 | `GET /api/cover?url=...` | Streams a cover image through with the right content type. Restricted to `goodreads.com` and `gr-assets.com` hosts, so it is not an open proxy. Cached on disk in a named volume. |
 | `GET /api/health` | Returns 200 without touching the network. |
 
-If Goodreads is slow or down, `/api/shelf` returns the last good cached copy with an `X-Shelf-Stale: 1` header. If there is no cached copy yet, it returns a 502 with a JSON error body that the UI displays directly.
+If Goodreads is slow or down, `/api/shelf` returns the last good copy with `X-Shelf-Stale: 1` and `X-Shelf-Age: <seconds>` headers, and the UI shows a note with that age under the masthead. The copy survives restarts (it is saved as `last-good.json` in the cover-cache volume). If there is no copy at all, it returns a 502 with a JSON error body that the UI displays directly, and does not ask Goodreads again for a minute unless `?refresh=1` is passed.
 
 ## Using it
 
@@ -225,7 +248,7 @@ Zilla Slab and Barlow Condensed are vendored as woff2 files in `web/site/fonts/`
 docker compose up -d --build     # start or rebuild
 docker compose ps                # health status of both containers
 docker compose logs -f proxy     # follow the proxy
-docker compose restart proxy     # clear the in-memory shelf cache
+docker compose restart proxy     # clear the in-memory shelf cache (the saved copy on disk is kept)
 docker compose down              # stop, keeps the cover cache volume
 docker compose down -v           # stop and drop the cover cache too
 ```
@@ -244,7 +267,8 @@ Both services declare `restart: unless-stopped` and a healthcheck, so they come 
 ├── proxy/                 roulette-proxy, FastAPI + httpx
 │   ├── Dockerfile
 │   ├── requirements.txt
-│   └── app/
+│   ├── app/
+│   └── tests/             offline parser tests: python3 -m unittest discover -s tests -t .
 └── web/                   roulette-web, nginx serving static files
     ├── Dockerfile
     ├── nginx.conf
@@ -278,8 +302,7 @@ a version such as `1.0.0` to pin. Tagging `vX.Y.Z` builds and publishes both.
 ## A note on Goodreads
 
 This is an unofficial personal project with no affiliation with, endorsement by, or connection
-to Goodreads or Amazon. It reads one public RSS feed that Goodreads publishes for a shelf, at
-the pace of one request per page with a delay between pages, and caches the result for an hour
-by default. It never writes anything back, and it holds no credentials beyond the optional
-private-feed key you supply for your own account. Book metadata and cover art belong to
-Goodreads and the respective rights holders.
+to Goodreads or Amazon. It reads the public shelf widgets that Goodreads offers for embedding,
+a handful of requests per refresh with a delay between them, and caches the result for an hour
+by default. It never writes anything back and holds no credentials at all. Book metadata and
+cover art belong to Goodreads and the respective rights holders.
