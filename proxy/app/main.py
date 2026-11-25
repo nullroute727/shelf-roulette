@@ -1,15 +1,18 @@
-"""Shelf Roulette backend: re-serves a Goodreads RSS shelf as clean JSON.
+"""Shelf Roulette backend: re-serves a Goodreads shelf as clean JSON.
 
-The Goodreads API is retired but the per-shelf RSS feed still works. Browsers cannot
-read it directly (XML, and CORS-blocked), so this service fetches it server-side,
-normalizes it, caches it, and also proxies cover images from the Goodreads CDN.
+Goodreads retired its API in 2020 and its RSS feeds in October 2026. The public
+shelf widgets still answer without a session, but they are JavaScript and
+CORS-blocked, so this service fetches them server-side, normalizes them, caches
+the result, and also proxies cover images from the Goodreads CDN.
 """
 
 from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import logging
+import os
 import time
 from typing import Any
 
@@ -21,6 +24,7 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 from .config import (
     BROWSER_USER_AGENT,
     CONNECT_TIMEOUT,
+    FAILURE_BACKOFF_SECONDS,
     MAX_COVER_BYTES,
     READ_TIMEOUT,
     REFRESH_MARGIN_SECONDS,
@@ -36,22 +40,32 @@ log = logging.getLogger("shelfroulette")
 COVER_CACHE_CONTROL = "public, max-age=604800"
 
 PRIVATE_SHELF_DETAIL = (
-    "The Goodreads profile or shelf is not publicly readable, so the RSS feed returned "
-    "no books. Fix this either by making the profile and shelf public in Goodreads "
-    "account settings, or by supplying the private feed key via the GOODREADS_RSS_KEY "
-    "environment variable."
+    "The Goodreads profile or shelf is not publicly readable, or the shelf is empty, "
+    "so the shelf widgets returned no books. Check GOODREADS_USER_ID and GOODREADS_SHELF, "
+    "and make the profile public in Goodreads account settings: since Goodreads "
+    "retired its RSS feeds there is no key that unlocks a private shelf."
 )
 
 
 class ShelfStore:
-    """TTL cache plus a separately retained last-known-good result."""
+    """TTL cache, a separately retained last-known-good result, and the last failure.
 
-    def __init__(self) -> None:
+    The last-known-good copy is also written to disk (inside the cover cache
+    volume) and read back at startup, so a restart in the middle of a Goodreads
+    outage still has a shelf to serve.
+    """
+
+    def __init__(self, path: str) -> None:
+        self.path = path
         self.lock = asyncio.Lock()
         self.fresh: list[dict[str, Any]] | None = None
         self.fresh_at: float = 0.0
         self.last_good: list[dict[str, Any]] | None = None
         self.last_good_at: float = 0.0
+        self.failed_at: float = 0.0
+        # (error, detail) of the last failed fetch; a fresh response is built from
+        # it each time so no Response object is ever sent twice.
+        self.last_error: tuple[str, str] | None = None
         # Bumped on every successful fetch so waiters on the lock can detect that
         # somebody else already did the work they were about to do.
         self.generation: int = 0
@@ -62,20 +76,84 @@ class ShelfStore:
             and (time.monotonic() - self.fresh_at) < settings.shelf_ttl_seconds
         )
 
+    def recently_failed(self) -> bool:
+        return self.failed_at > 0 and (time.monotonic() - self.failed_at) < FAILURE_BACKOFF_SECONDS
+
     def store(self, books: list[dict[str, Any]]) -> None:
         now = time.monotonic()
         self.fresh = books
         self.fresh_at = now
         self.last_good = books
         self.last_good_at = now
+        self.failed_at = 0.0
+        self.last_error = None
         self.generation += 1
+        self._save(books)
+
+    def fail(self, error: str, detail: str) -> None:
+        self.failed_at = time.monotonic()
+        self.last_error = (error, detail)
+
+    def error_response(self) -> JSONResponse:
+        error, detail = self.last_error or (
+            "Could not load the Goodreads shelf",
+            "The shelf has not been fetched yet.",
+        )
+        return _error(502, error, detail)
+
+    def _save(self, books: list[dict[str, Any]]) -> None:
+        if not cover_cache.enabled:
+            return
+        tmp = self.path + ".tmp"
+        try:
+            with open(tmp, "w", encoding="utf-8") as handle:
+                json.dump(
+                    {
+                        "saved_at": time.time(),
+                        "userId": settings.goodreads_user_id,
+                        "shelf": settings.goodreads_shelf,
+                        "books": books,
+                    },
+                    handle,
+                )
+            os.replace(tmp, self.path)
+        except OSError as exc:
+            log.warning("could not persist the shelf to %s: %s", self.path, exc)
+
+    def load(self) -> None:
+        try:
+            with open(self.path, "r", encoding="utf-8") as handle:
+                payload = json.load(handle)
+            books = payload["books"]
+            saved_at = float(payload["saved_at"])
+            if not isinstance(books, list):
+                raise ValueError("books is not a list")
+        except FileNotFoundError:
+            return
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            log.warning("ignoring unreadable shelf snapshot %s: %s", self.path, exc)
+            return
+        # A snapshot of some other account or shelf must never be served as this one.
+        if payload.get("userId") != settings.goodreads_user_id or payload.get("shelf") != settings.goodreads_shelf:
+            log.info("ignoring shelf snapshot %s: it belongs to a different user or shelf", self.path)
+            return
+        age = max(time.time() - saved_at, 0.0)
+        self.last_good = books
+        self.last_good_at = time.monotonic() - age
+        # A snapshot younger than the TTL is as good as a cached fetch, so the
+        # first visitor after a restart gets it at once instead of waiting on the
+        # warm-up walk. The warm-up still runs and replaces it.
+        if age < settings.shelf_ttl_seconds:
+            self.fresh = books
+            self.fresh_at = self.last_good_at
+        log.info("restored %d books saved %d minutes ago from %s", len(books), int(age // 60), self.path)
 
 
-store = ShelfStore()
+store = ShelfStore(settings.last_good_path)
 
 
 async def _fetch_shelf_bounded(client: httpx.AsyncClient) -> list[dict[str, Any]]:
-    """Walk the feed under a total deadline, so one slow page cannot stall the request."""
+    """Walk the widgets under a total deadline, so one slow request cannot stall the request."""
     if not settings.goodreads_user_id:
         # Caught by the FeedError handler below, so the browser shows this sentence
         # rather than whatever Goodreads returns for a user-id-shaped hole in the URL.
@@ -91,12 +169,48 @@ async def _fetch_shelf_bounded(client: httpx.AsyncClient) -> list[dict[str, Any]
         ) from exc
 
 
+def _error_for(exc: Exception) -> tuple[str, str]:
+    """Map a fetch failure to the (error, detail) the browser displays verbatim."""
+    if isinstance(exc, PrivateShelfError):
+        return (
+            "Shelf is empty or private",
+            f"{PRIVATE_SHELF_DETAIL} Upstream signal: {exc}.",
+        )
+    if isinstance(exc, FeedError):
+        return (
+            "Could not load the Goodreads shelf",
+            f"The Goodreads shelf widgets could not be fetched or parsed: {exc}",
+        )
+    return (
+        "Could not load the Goodreads shelf",
+        f"Unexpected error while loading the shelf: {exc}",
+    )
+
+
+async def _refresh_locked(client: httpx.AsyncClient, source: str) -> None:
+    """Fetch and store under the lock, recording a failure instead of raising."""
+    try:
+        books = await _fetch_shelf_bounded(client)
+    except PrivateShelfError as exc:
+        log.warning("%s: shelf returned zero items: %s", source, exc)
+        store.fail(*_error_for(exc))
+    except FeedError as exc:
+        log.warning("%s: shelf fetch failed: %s", source, exc)
+        store.fail(*_error_for(exc))
+    except Exception as exc:  # defensive: never leak a 500 to the frontend
+        log.exception("%s: unexpected shelf fetch error", source)
+        store.fail(*_error_for(exc))
+    else:
+        store.store(books)
+        log.info("%s: %d books", source, len(books))
+
+
 async def _warm_shelf_loop(client: httpx.AsyncClient) -> None:
     """Refresh the shelf on a timer so no browser request ever pays for a cold fetch.
 
     Every client timeout this app has recorded landed on a request that arrived
-    with an empty cache and then had to sit through the whole paginated Goodreads
-    walk. Refreshing just before the TTL expires means the cached copy is replaced
+    with an empty cache and then had to sit through the whole upstream walk.
+    Refreshing just before the TTL expires means the cached copy is replaced
     rather than allowed to go cold, so /api/shelf answers out of memory in
     milliseconds even on a phone that opens the app once a day.
     """
@@ -105,9 +219,7 @@ async def _warm_shelf_loop(client: httpx.AsyncClient) -> None:
     while True:
         try:
             async with store.lock:
-                books = await _fetch_shelf_bounded(client)
-                store.store(books)
-                log.info("background refresh: %d books", len(books))
+                await _refresh_locked(client, "background refresh")
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -120,6 +232,7 @@ async def _warm_shelf_loop(client: httpx.AsyncClient) -> None:
 @contextlib.asynccontextmanager
 async def lifespan(app: FastAPI):
     cover_cache.prepare()
+    store.load()
     client = httpx.AsyncClient(
         timeout=httpx.Timeout(
             connect=CONNECT_TIMEOUT, read=READ_TIMEOUT, write=CONNECT_TIMEOUT, pool=CONNECT_TIMEOUT
@@ -132,11 +245,10 @@ async def lifespan(app: FastAPI):
     )
     app.state.client = client
     log.info(
-        "shelf source: user=%s shelf=%s ttl=%ss key=%s",
+        "shelf source: user=%s shelf=%s ttl=%ss",
         settings.goodreads_user_id,
         settings.goodreads_shelf,
         settings.shelf_ttl_seconds,
-        "set" if settings.goodreads_rss_key else "unset",
     )
     warmer = asyncio.create_task(_warm_shelf_loop(client))
     try:
@@ -148,7 +260,7 @@ async def lifespan(app: FastAPI):
         await client.aclose()
 
 
-app = FastAPI(title="Shelf Roulette", version="1.0.0", lifespan=lifespan)
+app = FastAPI(title="Shelf Roulette", version="1.1.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -180,8 +292,12 @@ async def health() -> JSONResponse:
 async def shelf(refresh: str | None = Query(default=None)) -> Response:
     want_refresh = refresh not in (None, "", "0", "false", "no")
 
-    if not want_refresh and store.is_fresh():
-        return _shelf_response(store.fresh, stale=False, age=time.monotonic() - store.fresh_at)
+    if not want_refresh:
+        if store.is_fresh():
+            return _shelf_response(store.fresh, stale=False, age=time.monotonic() - store.fresh_at)
+        if store.recently_failed():
+            # Goodreads just failed; do not walk it again for every retry.
+            return _stale_response() or store.error_response()
 
     generation_before = store.generation
 
@@ -196,42 +312,10 @@ async def shelf(refresh: str | None = Query(default=None)) -> Response:
                 store.fresh, stale=False, age=time.monotonic() - store.fresh_at
             )
 
-        try:
-            books = await _fetch_shelf_bounded(app.state.client)
-        except PrivateShelfError as exc:
-            log.warning("shelf feed returned zero items: %s", exc)
-            stale = _stale_response()
-            if stale is not None:
-                return stale
-            return _error(
-                502,
-                "Shelf is empty or private",
-                f"{PRIVATE_SHELF_DETAIL} Upstream signal: {exc}.",
-            )
-        except FeedError as exc:
-            log.warning("shelf fetch failed: %s", exc)
-            stale = _stale_response()
-            if stale is not None:
-                return stale
-            return _error(
-                502,
-                "Could not load the Goodreads shelf",
-                f"The Goodreads RSS feed could not be fetched or parsed: {exc}",
-            )
-        except Exception as exc:  # defensive: never leak a 500 to the frontend
-            log.exception("unexpected shelf fetch error")
-            stale = _stale_response()
-            if stale is not None:
-                return stale
-            return _error(
-                502,
-                "Could not load the Goodreads shelf",
-                f"Unexpected error while loading the shelf: {exc}",
-            )
-
-        store.store(books)
-        log.info("shelf refreshed: %d books", len(books))
-        return _shelf_response(books, stale=False, age=0.0)
+        await _refresh_locked(app.state.client, "shelf refresh")
+        if store.last_error is not None:
+            return _stale_response() or store.error_response()
+        return _shelf_response(store.fresh, stale=False, age=0.0)
 
 
 def _stale_response() -> Response | None:

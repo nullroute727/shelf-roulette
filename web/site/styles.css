@@ -121,6 +121,15 @@ body {
   color: #9fb3c8;
 }
 
+/* Shown only when the proxy served its saved copy because Goodreads was down. */
+.masthead-stale {
+  margin: 8px auto 0;
+  max-width: 34em;
+  font-size: 13px;
+  line-height: 1.4;
+  color: #c9962b;
+}
+
 /* ---------- Stage ---------- */
 
 .stage {

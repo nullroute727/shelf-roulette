@@ -1,148 +1,175 @@
-"""Goodreads RSS shelf fetching and parsing."""
+"""Goodreads shelf fetching, via the public shelf widgets.
+
+The per-shelf RSS feed this used to read was retired by Goodreads in October
+2026, and the shelf pages now redirect to sign-in. The embeddable widgets still
+answer without a session, so the shelf is assembled from those:
+
+* the public profile page lists each shelf with its count, which tells the walk
+  when it is done and is the one place a wrong user id fails loudly;
+* the grid widget (about 200 books per call) is the backbone: review id, full
+  title and cover for every book, requested in several sort orders and unioned
+  until the count is reached or an order adds nothing new;
+* the custom widget (100 per call) is the only one that names the author, so it
+  is walked the same way just to fill that field in.
+"""
 
 from __future__ import annotations
 
 import asyncio
 import logging
-import xml.etree.ElementTree as ET
+import time
 from typing import Any
-from xml.etree.ElementTree import ParseError
 
 import httpx
 
-from .config import MAX_FEED_PAGES, PAGE_DELAY_SECONDS, settings
+from .config import PAGE_DELAY_SECONDS, WIDGET_SORTS, settings
+from .widgets import WidgetError, decode_widget, parse_widget, shelf_count
 
 log = logging.getLogger("shelfroulette.feed")
 
 
 class FeedError(Exception):
-    """Upstream feed could not be fetched or parsed."""
+    """Upstream shelf could not be fetched or parsed."""
 
 
 class PrivateShelfError(FeedError):
-    """Feed parsed fine but contained no items at all."""
+    """Fetch worked but the shelf is empty, private, or belongs to no such user."""
 
 
-def _text(element: ET.Element | None, tag: str) -> str:
-    """Return a stripped child text value, or an empty string."""
-    if element is None:
-        return ""
-    raw = element.findtext(tag)
-    return raw.strip() if raw else ""
+class _Walker:
+    """Sequential upstream requests with the inter-request delay and a fresh widget id each."""
 
+    def __init__(self, client: httpx.AsyncClient) -> None:
+        self.client = client
+        self.requests = 0
 
-def _to_int(raw: str) -> int | None:
-    """Coerce feed text to int, returning None for blanks and junk."""
-    if not raw:
-        return None
-    try:
-        return int(raw)
-    except ValueError:
-        pass
-    try:
-        return int(float(raw))
-    except (ValueError, OverflowError):
-        return None
+    def _widget_id(self) -> str:
+        return f"{int(time.time() * 1000)}{self.requests}"
 
+    async def get(self, label: str, url: str, params: dict[str, str] | None = None) -> httpx.Response:
+        if self.requests:
+            await asyncio.sleep(PAGE_DELAY_SECONDS)
+        self.requests += 1
+        try:
+            return await self.client.get(url, params=params)
+        except httpx.HTTPError as exc:
+            raise FeedError(f"request for the {label} failed: {exc}") from exc
 
-def _to_float(raw: str) -> float | None:
-    if not raw:
-        return None
-    try:
-        value = float(raw)
-    except (ValueError, OverflowError):
-        return None
-    # Reject NaN and infinities so the JSON stays valid.
-    if value != value or value in (float("inf"), float("-inf")):
-        return None
-    return value
-
-
-def _cover_url(raw: str) -> str | None:
-    """Drop the Goodreads placeholder cover so the frontend can use its own fallback."""
-    if not raw:
-        return None
-    if "nophoto" in raw.lower():
-        return None
-    return raw
-
-
-def parse_items(xml_bytes: bytes) -> list[dict[str, Any]]:
-    """Parse one RSS page into book dicts. Raises FeedError on unparseable XML."""
-    try:
-        root = ET.fromstring(xml_bytes)
-    except ParseError as exc:
-        raise FeedError(f"could not parse RSS XML: {exc}") from exc
-
-    channel = root.find("channel")
-    if channel is None:
-        raise FeedError("RSS document has no channel element")
-
-    books: list[dict[str, Any]] = []
-    for item in channel.findall("item"):
-        title = _text(item, "title")
-        link = _text(item, "link")
-        if not title and not link:
-            continue
-
-        # num_pages is nested under <book>, not a direct child of <item>.
-        pages = _to_int(_text(item.find("book"), "num_pages"))
-
-        books.append(
-            {
-                "book_id": _text(item, "book_id") or link or title,
-                "title": title,
-                "author": _text(item, "author_name"),
-                "pages": pages,
-                "rating": _to_float(_text(item, "average_rating")),
-                "year": _to_int(_text(item, "book_published")),
-                "coverUrl": _cover_url(_text(item, "book_large_image_url")),
-                "goodreadsUrl": link,
-            }
+    async def widget(self, kind: str, sort: str, order: str) -> list[dict[str, Any]]:
+        label = f"{kind} widget ({sort} {order})"
+        response = await self.get(
+            label,
+            settings.widget_url(kind),
+            settings.widget_params(kind, sort, order, self._widget_id()),
         )
-    return books
+
+        # A genuinely private profile answers 401 or 403 rather than an empty widget.
+        if response.status_code in (401, 403):
+            raise PrivateShelfError(
+                f"{label} returned HTTP {response.status_code}, the shelf is not publicly readable"
+            )
+        if response.status_code != 200:
+            raise FeedError(f"{label} returned HTTP {response.status_code}")
+
+        try:
+            books = parse_widget(decode_widget(response.content))
+        except WidgetError as exc:
+            raise FeedError(f"{label}: {exc}") from exc
+        log.info("%s yielded %d items", label, len(books))
+        return books
 
 
 async def fetch_shelf(client: httpx.AsyncClient) -> list[dict[str, Any]]:
-    """Walk the shelf feed page by page until an empty page, then return unique books."""
-    seen: set[str] = set()
-    books: list[dict[str, Any]] = []
-    url = settings.feed_url
+    """Assemble the shelf from the widgets and return unique books, newest-added first."""
+    walker = _Walker(client)
+    expected = await _expected_count(walker)
 
-    for page in range(1, MAX_FEED_PAGES + 1):
-        if page > 1:
-            await asyncio.sleep(PAGE_DELAY_SECONDS)
-
-        try:
-            response = await client.get(url, params=settings.feed_params(page))
-        except httpx.HTTPError as exc:
-            raise FeedError(f"request for page {page} failed: {exc}") from exc
-
-        # A genuinely private profile answers 401 or 403 rather than returning an
-        # empty feed, so it needs the same "make it public or pass a key" advice.
-        if response.status_code in (401, 403):
-            raise PrivateShelfError(
-                f"page {page} returned HTTP {response.status_code}, the shelf is not publicly readable"
-            )
-
-        if response.status_code != 200:
-            raise FeedError(f"page {page} returned HTTP {response.status_code}")
-
-        page_books = parse_items(response.content)
-        log.info("shelf page %d yielded %d items", page, len(page_books))
-        if not page_books:
+    # Backbone walk. Every call is capped and the cap is not exact (a 249-book
+    # shelf gave 199 from a "200" grid), so the only trustworthy stop signals are
+    # reaching the profile's count or an order that adds nothing new.
+    books: dict[str, dict[str, Any]] = {}
+    complete = False
+    for sort, order in WIDGET_SORTS:
+        page = await walker.widget("grid", sort, order)
+        added = 0
+        for book in page:
+            if book["book_id"] not in books:
+                books[book["book_id"]] = book
+                added += 1
+        if expected is not None and len(books) >= expected:
+            complete = True
+            break
+        if added == 0:
+            complete = expected is None and bool(books)
             break
 
-        for book in page_books:
-            key = book.pop("book_id")
-            if key in seen:
-                continue
-            seen.add(key)
-            books.append(book)
-    else:
-        log.warning("hit page cap of %d, shelf may be truncated", MAX_FEED_PAGES)
+    # Author pass. Only the custom widget names the author, and it is capped
+    # lower, so walk it only as far as there are authors left to fill in. It is
+    # also a full record, and the grid has been seen to skip the odd book, so
+    # anything it lists that the grid did not is added rather than ignored.
+    rescued = 0
+    for sort, order in WIDGET_SORTS:
+        if books and all(book["author"] for book in books.values()):
+            break
+        for item in await walker.widget("custom", sort, order):
+            book = books.get(item["book_id"])
+            if book is None:
+                books[item["book_id"]] = item
+                rescued += 1
+            elif item["author"] and not book["author"]:
+                book["author"] = item["author"]
+    if rescued:
+        log.info("%d books came only from the custom widget", rescued)
+    still_missing = sum(1 for book in books.values() if not book["author"])
+    if still_missing:
+        log.info("%d books have no author from the widgets", still_missing)
 
     if not books:
-        raise PrivateShelfError("feed returned zero items")
+        raise PrivateShelfError("the shelf widgets returned zero items")
+    if expected is not None and len(books) != expected:
+        log.warning(
+            "profile says shelf %r holds %d books but the widgets gave %d",
+            settings.goodreads_shelf,
+            expected,
+            len(books),
+        )
+    elif not complete and expected is None:
+        log.warning("shelf may be truncated at %d books after %d grid orders", len(books), len(WIDGET_SORTS))
 
-    return books
+    log.info("shelf assembled: %d books from %d upstream requests", len(books), walker.requests)
+    result = []
+    for book in books.values():
+        book.pop("book_id", None)
+        result.append(book)
+    return result
+
+
+async def _expected_count(walker: _Walker) -> int | None:
+    """Shelf size from the public profile, or None when the page will not say.
+
+    A 404 here is the one unambiguous signal that the user id is wrong, so it
+    is raised rather than logged. Everything else degrades to "count unknown":
+    the widgets are the deliverable, and this page is bigger and more likely to
+    change than they are.
+    """
+    try:
+        response = await walker.get("profile page", settings.profile_url)
+    except FeedError as exc:
+        log.warning("profile count check skipped: %s", exc)
+        return None
+    if response.status_code == 404:
+        raise PrivateShelfError(
+            f"Goodreads has no user with id {settings.goodreads_user_id} (profile page is HTTP 404)"
+        )
+    if response.status_code != 200:
+        log.warning("profile page returned HTTP %d, count check skipped", response.status_code)
+        return None
+    if "/user/sign_in" in str(response.url):
+        log.warning("profile page redirected to sign-in; the profile may be private")
+        return None
+    expected = shelf_count(response.text, settings.goodreads_shelf)
+    if expected is None:
+        log.info("profile page lists no count for shelf %r", settings.goodreads_shelf)
+    else:
+        log.info("profile says shelf %r holds %d books", settings.goodreads_shelf, expected)
+    return expected
