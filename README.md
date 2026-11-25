@@ -1,6 +1,8 @@
 # Shelf Roulette
 
-Shelf Roulette is a wheel of book spines that picks what you read next. It reads your Goodreads to-read shelf live, so there's no CSV to export, and it never writes anything back. It runs as two small containers on your own machine, and the browser only ever talks to your server.
+Shelf Roulette picks your next book. It loads the books on your Goodreads to-read shelf onto a wheel, and you spin it.
+
+It's a small web app you host yourself with Docker. One container fetches your shelf from Goodreads' RSS feed, and the other serves the wheel.
 
 ![Platform](https://img.shields.io/badge/platform-linux%2Famd64%20%7C%20arm64-0078D6?style=flat-square&logo=docker&logoColor=white)
 ![Release](https://img.shields.io/github/v/release/nullroute727/shelf-roulette?style=flat-square&color=orange)
